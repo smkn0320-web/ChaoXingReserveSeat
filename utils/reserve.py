@@ -232,37 +232,37 @@ class reserve:
         return tl[0]
 
     def submit(self, times, roomid, seatid, action):
-    if isinstance(seatid, str):
-        seatid = [seatid]
+        if isinstance(seatid, str):
+            seatid = [seatid]
 
-    for attempt in range(self.max_attempt):
-        for seat in seatid:
-            token, value = self._get_page_token(
-                self.url.format(roomid, seat), require_value=True
-            )
-            logging.info(f"第 {attempt + 1} 轮，尝试座位：{seat}")
-            logging.info(f"Get token: {token}")
+        for attempt in range(self.max_attempt):
+            for seat in seatid:
+                token, value = self._get_page_token(
+                    self.url.format(roomid, seat), require_value=True
+                )
+                logging.info(f"第 {attempt + 1} 轮，尝试座位：{seat}")
+                logging.info(f"Get token: {token}")
 
-            captcha = self.resolve_captcha() if self.enable_slider else ""
+                captcha = self.resolve_captcha() if self.enable_slider else ""
 
-            suc = self.get_submit(
-                self.submit_url,
-                times=times,
-                token=token,
-                roomid=roomid,
-                seatid=seat,
-                captcha=captcha,
-                action=action,
-                value=value,
-            )
+                suc = self.get_submit(
+                    self.submit_url,
+                    times=times,
+                    token=token,
+                    roomid=roomid,
+                    seatid=seat,
+                    captcha=captcha,
+                    action=action,
+                    value=value,
+                )
 
-            if suc:
-                logging.info(f"预约成功，座位号：{seat}")
-                return True
+                if suc:
+                    logging.info(f"预约成功，座位号：{seat}")
+                    return True
 
-            time.sleep(self.sleep_time)
+                time.sleep(self.sleep_time)
 
-    return False
+        return False
 
     def get_submit(
         self, url, times, token, roomid, seatid, captcha="", action=False, value=""
