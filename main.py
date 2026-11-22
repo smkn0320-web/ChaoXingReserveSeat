@@ -8,7 +8,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-
 from utils import reserve, get_user_credentials
 
 get_current_time = lambda action: (
@@ -23,142 +22,152 @@ get_current_dayofweek = lambda action: (
 )
 
 
-SLEEPTIME = 0.1  # 每次抢座的间隔
-STARTTIME = "21:00:00"  # 北京时间：到这个时间才开始第一次预约尝试
-ENDTIME = "21:05:00"  # 根据学校的预约座位时间+1min即可
+SLEEPTIME = 0.1  # 每次尝试座位之间的间隔
+STARTTIME = "21:00:00"  # 北京时间：到这个时间才开始提交预约请求
+ENDTIME = "21:05:00"  # 预约尝试截止时间
 
 ENABLE_SLIDER = False  # 是否有滑块验证
-MAX_ATTEMPT = 40  # 最大尝试次数
+MAX_ATTEMPT = 40  # reserve.submit 内部最大轮数
 RESERVE_NEXT_DAY = False  # 预约明天而不是今天的
 
 
-def login_and_reserve(users, usernames, passwords, action, success_list=None):
-    logging.info(
-        f"Global settings: \nSLEEPTIME: {SLEEPTIME}\nENDTIME: {ENDTIME}\nENABLE_SLIDER: {ENABLE_SLIDER}\nRESERVE_NEXT_DAY: {RESERVE_NEXT_DAY}"
-    )
-    if action and len(usernames.split(",")) != len(users):
+def prepare_sessions(users, usernames, passwords, action):
+    """在预约开放前完成登录，返回已登录的会话；此处不提交预约请求。"""
+    if action and (len(usernames.split(",")) != len(users) or len(passwords.split(",")) != len(users)):
         raise Exception("user number should match the number of config")
-    if success_list is None:
-        success_list = [False] * len(users)
+
     current_dayofweek = get_current_dayofweek(action)
+    sessions = [None] * len(users)
+
     for index, user in enumerate(users):
         username, password, times, roomid, seatid, daysofweek = user.values()
-        if action:
-            username, password = (
-                usernames.split(",")[index],
-                passwords.split(",")[index],
-            )
         if current_dayofweek not in daysofweek:
-            logging.info("Today not set to reserve")
+            logging.info("Today not set to reserve; skip this user")
             continue
-        if not success_list[index]:
-            logging.info(
-                f"----------- {username} -- {times} -- {seatid} try -----------"
-            )
-            s = reserve(
-                sleep_time=SLEEPTIME,
-                max_attempt=MAX_ATTEMPT,
-                enable_slider=ENABLE_SLIDER,
-                reserve_next_day=RESERVE_NEXT_DAY,
-            )
-            s.get_login_status()
-            s.login(username, password)
-            s.requests.headers.update({"Host": "office.chaoxing.com"})
-            suc = s.submit(times, roomid, seatid, action)
-            success_list[index] = suc
-    return success_list
+
+        if action:
+            username = usernames.split(",")[index]
+            password = passwords.split(",")[index]
+
+        logging.info(f"准备登录：{username}；预约时段：{times}；座位列表：{seatid}")
+        session = reserve(
+            sleep_time=SLEEPTIME,
+            max_attempt=MAX_ATTEMPT,
+            enable_slider=ENABLE_SLIDER,
+            reserve_next_day=RESERVE_NEXT_DAY,
+        )
+        session.get_login_status()
+        login_ok, login_message = session.login(username, password)
+        if not login_ok:
+            raise RuntimeError(f"账号登录失败，未开始预约：{login_message}")
+        session.requests.headers.update({"Host": "office.chaoxing.com"})
+        sessions[index] = session
+        logging.info(f"{username} 登录准备完成；尚未提交预约请求")
+
+    return sessions
 
 
 def main(users, action=False):
     current_time = get_current_time(action)
     logging.info(f"start time {current_time}, action {'on' if action else 'off'}")
-    attempt_times = 0
-    usernames, passwords = None, None
+    usernames, passwords = (None, None)
     if action:
         usernames, passwords = get_user_credentials(action)
-    success_list = None
+
     current_dayofweek = get_current_dayofweek(action)
-    today_reservation_num = sum(
-        1 for d in users if current_dayofweek in d.get("daysofweek")
-    )
+    active_indices = [
+        i for i, user in enumerate(users)
+        if current_dayofweek in user.get("daysofweek", [])
+    ]
+    if not active_indices:
+        logging.info("Today not set to reserve for any configured user; exit")
+        return
 
-    # GitHub Actions may start the workflow before 21:00. Wait here so the
-    # first call to login_and_reserve() begins at/after STARTTIME, rather than
-    # advancing through the configured seat list before the booking window.
+    # 提前完成登录和会话初始化；prepare_sessions 不会调用 submit。
+    sessions = prepare_sessions(users, usernames, passwords, action)
+    success_list = [False] * len(users)
+
+    # GitHub Actions 预计北京时间20:58启动；等待到21:00再发起第一次预约提交。
+    current_time = get_current_time(action)
     if current_time < STARTTIME:
-        logging.info(f"waiting until {STARTTIME} (UTC+8) before first reserve attempt")
+        logging.info(f"登录准备已完成，等待北京时间 {STARTTIME} 开始预约")
         while current_time < STARTTIME:
-            time.sleep(0.2)
+            time.sleep(0.1)
             current_time = get_current_time(action)
-        logging.info(f"reservation start reached: {current_time}")
 
+    logging.info(f"到达预约开始时间：{current_time}；现在开始按配置顺序提交")
+
+    attempt_times = 0
     while current_time < ENDTIME:
         attempt_times += 1
-        # try:
-        success_list = login_and_reserve(
-            users, usernames, passwords, action, success_list
-        )
-        # except Exception as e:
-        #     print(f"An error occurred: {e}")
+        for index in active_indices:
+            if success_list[index]:
+                continue
+
+            user = users[index]
+            _, _, times, roomid, seatid, _ = user.values()
+            if isinstance(seatid, str):
+                seatid = [seatid]
+
+            logging.info(f"第 {attempt_times} 轮；即将按配置顺序尝试座位：{seatid}")
+            success_list[index] = sessions[index].submit(times, roomid, seatid, action)
+
         print(
             f"attempt time {attempt_times}, time now {current_time}, success list {success_list}"
         )
-        current_time = get_current_time(action)
-        if sum(success_list) == today_reservation_num:
-            print(f"reserved successfully!")
+        if all(success_list[i] for i in active_indices):
+            logging.info("所有符合今天预约条件的账号均已预约成功")
             return
+
+        current_time = get_current_time(action)
+
+    logging.info(f"到达截止时间 {ENDTIME}；预约循环结束。最终结果：{success_list}")
 
 
 def debug(users, action=False):
     logging.info(
         f"Global settings: \nSLEEPTIME: {SLEEPTIME}\nENDTIME: {ENDTIME}\nENABLE_SLIDER: {ENABLE_SLIDER}\nRESERVE_NEXT_DAY: {RESERVE_NEXT_DAY}"
     )
-    suc = False
-    logging.info(f" Debug Mode start! , action {'on' if action else 'off'}")
     if action:
         usernames, passwords = get_user_credentials(action)
     current_dayofweek = get_current_dayofweek(action)
     for index, user in enumerate(users):
         username, password, times, roomid, seatid, daysofweek = user.values()
-        if type(seatid) == str:
+        if isinstance(seatid, str):
             seatid = [seatid]
         if action:
-            username, password = (
-                usernames.split(",")[index],
-                passwords.split(",")[index],
-            )
+            username, password = usernames.split(",")[index], passwords.split(",")[index]
         if current_dayofweek not in daysofweek:
             logging.info("Today not set to reserve")
             continue
         logging.info(f"----------- {username} -- {times} -- {seatid} try -----------")
-        s = reserve(
+        session = reserve(
             sleep_time=SLEEPTIME,
             max_attempt=MAX_ATTEMPT,
             enable_slider=ENABLE_SLIDER,
             reserve_next_day=RESERVE_NEXT_DAY,
         )
-        s.get_login_status()
-        s.login(username, password)
-        s.requests.headers.update({"Host": "office.chaoxing.com"})
-        suc = s.submit(times, roomid, seatid, action)
-        if suc:
+        session.get_login_status()
+        session.login(username, password)
+        session.requests.headers.update({"Host": "office.chaoxing.com"})
+        if session.submit(times, roomid, seatid, action):
             return
 
 
 def get_roomid(args1, args2):
     username = input("请输入用户名：")
     password = input("请输入密码：")
-    s = reserve(
+    session = reserve(
         sleep_time=SLEEPTIME,
         max_attempt=MAX_ATTEMPT,
         enable_slider=ENABLE_SLIDER,
         reserve_next_day=RESERVE_NEXT_DAY,
     )
-    s.get_login_status()
-    s.login(username=username, password=password)
-    s.requests.headers.update({"Host": "office.chaoxing.com"})
+    session.get_login_status()
+    session.login(username=username, password=password)
+    session.requests.headers.update({"Host": "office.chaoxing.com"})
     encode = input("请输入deptldEnc：")
-    s.roomid(encode)
+    session.roomid(encode)
 
 
 if __name__ == "__main__":
@@ -166,20 +175,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="Chao Xing seat auto reserve")
     parser.add_argument("-u", "--user", default=config_path, help="user config file")
     parser.add_argument(
-        "-m",
-        "--method",
-        default="reserve",
-        choices=["reserve", "debug", "room"],
-        help="for debug",
+        "-m", "--method", default="reserve",
+        choices=["reserve", "debug", "room"], help="for debug"
     )
     parser.add_argument(
-        "-a",
-        "--action",
-        action="store_true",
-        help="use --action to enable in github action",
+        "-a", "--action", action="store_true",
+        help="use --action to enable in github action"
     )
     args = parser.parse_args()
     func_dict = {"reserve": main, "debug": debug, "room": get_roomid}
-    with open(args.user, "r+") as data:
+    with open(args.user, "r", encoding="utf-8") as data:
         usersdata = json.load(data)["reserve"]
     func_dict[args.method](usersdata, args.action)
