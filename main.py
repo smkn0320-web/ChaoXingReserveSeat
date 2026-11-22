@@ -24,6 +24,7 @@ get_current_dayofweek = lambda action: (
 
 
 SLEEPTIME = 0.1  # 每次抢座的间隔
+STARTTIME = "21:00:00"  # 北京时间：到这个时间才开始第一次预约尝试
 ENDTIME = "21:05:00"  # 根据学校的预约座位时间+1min即可
 
 ENABLE_SLIDER = False  # 是否有滑块验证
@@ -80,6 +81,17 @@ def main(users, action=False):
     today_reservation_num = sum(
         1 for d in users if current_dayofweek in d.get("daysofweek")
     )
+
+    # GitHub Actions may start the workflow before 21:00. Wait here so the
+    # first call to login_and_reserve() begins at/after STARTTIME, rather than
+    # advancing through the configured seat list before the booking window.
+    if current_time < STARTTIME:
+        logging.info(f"waiting until {STARTTIME} (UTC+8) before first reserve attempt")
+        while current_time < STARTTIME:
+            time.sleep(0.2)
+            current_time = get_current_time(action)
+        logging.info(f"reservation start reached: {current_time}")
+
     while current_time < ENDTIME:
         attempt_times += 1
         # try:
