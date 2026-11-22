@@ -26,8 +26,8 @@ get_current_dayofweek = lambda action: (
 SLEEPTIME = 0.1  # 每次抢座的间隔
 ENDTIME = "21:02:00"  # 根据学校的预约座位时间+1min即可
 
-ENABLE_SLIDER = True  # 是否有滑块验证
-MAX_ATTEMPT = 20  # 最大尝试次数
+ENABLE_SLIDER = False  # 是否有滑块验证
+MAX_ATTEMPT = 40  # 最大尝试次数
 RESERVE_NEXT_DAY = True  # 预约明天而不是今天的
 
 
